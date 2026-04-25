@@ -10,7 +10,13 @@ export const errorHandler = (err, req, res, next) => {
     logger.error(err.stack);
   }
 
-  const statusCode = err.statusCode || err.status || 500;
+  let statusCode = err.statusCode || err.status || 500;
+  if (typeof statusCode === 'string') {
+    statusCode = parseInt(statusCode, 10);
+  }
+  if (isNaN(statusCode) || statusCode < 100 || statusCode > 599) {
+    statusCode = 500;
+  }
 
   res.status(statusCode).json({
     error: err.message || 'Internal Server Error',

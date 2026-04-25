@@ -14,7 +14,12 @@ export const validate = (schema, type = 'body') => (req, res, next) => {
       });
     }
     // Update the request object with the parsed (and possibly coerced/transformed) data
-    req[type] = result.data;
+    if (type === 'query') {
+      for (const key of Object.keys(req.query)) delete req.query[key];
+      Object.assign(req.query, result.data);
+    } else {
+      req[type] = result.data;
+    }
     next();
   } catch (err) {
     next(err);

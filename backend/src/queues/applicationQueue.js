@@ -1,53 +1,14 @@
-// src/queues/applicationQueue.js
 import { Queue } from 'bullmq';
-import { createLogger } from '../lib/logger.js';
+import { redisConnection } from '../lib/redis.js';
 
-const logger = createLogger('queue');
-
-// Parse Redis connection from REDIS_URL or use defaults
-const getRedisConnection = () => {
-  const redisUrl = process.env.REDIS_URL?.trim();
-  if (redisUrl) {
-    try {
-      // Handle cases where the URL might still be wrapped in quotes
-      const cleanUrl = redisUrl.replace(/^["']|["']$/g, '');
-      const url = new URL(cleanUrl);
-      return {
-        host: url.hostname,
-        port: parseInt(url.port) || 6379,
-        password: decodeURIComponent(url.password || ''),
-        username: decodeURIComponent(url.username || ''),
-        ...(url.protocol === 'rediss:' && { tls: {} }), // TLS for rediss:// URIs
-      };
-    } catch (e) {
-      logger.warn(`Failed to parse REDIS_URL, using defaults: ${e.message}`);
-    }
-  }
-  return { host: '127.0.0.1', port: 6379 };
-};
-
-const connection = getRedisConnection();
-
-export const applicationQueue = new Queue('applications', {
-  connection,
+export const applicationQueue = new Queue('applicationQueue', {
+  connection: redisConnection,
   defaultJobOptions: {
-    removeOnComplete: { count: 200 },   // Keep last 200 completed
-    removeOnFail: { count: 500 },       // Keep last 500 failed
+    removeOnComplete: { count: 200 },
+    removeOnFail: { count: 500 },
     attempts: 2,
     backoff: { type: 'exponential', delay: 30000 },
   },
 });
-
-// Event listeners
-applicationQueue.on('error', (err) => {
-  // Don't crash on Redis connection errors — just log
-  if (err.message?.includes('ECONNREFUSED') || err.message?.includes('ENOTFOUND')) {
-    logger.warn('Redis not available — queue operations will fail until Redis is connected');
-  } else {
-    logger.error(`Queue error: ${err.message}`);
-  }
-});
-
-logger.info('Application queue initialized');
 
 export default applicationQueue;

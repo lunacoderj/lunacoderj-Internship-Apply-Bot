@@ -93,9 +93,34 @@ router.post('/email', express.raw({ type: 'application/json' }), async (req, res
     const subject = emailData.subject || '(no subject)';
     const fromAddress = emailData.from || 'unknown';
 
-    // Extract job URLs
-    const jobUrls = extractUrls(bodyText + ' ' + subject);
-    logger.info(`Extracted ${jobUrls.length} job URL(s) from email "${subject}"`);
+    // ── AI Extraction ───────────────────────────────────────────
+    const geminiKey = process.env.GEMINI_API_KEY;
+    let extractedOffers = [];
+    
+    if (geminiKey) {
+      const ai = new AIService(geminiKey, 'gemini');
+      try {
+        const aiResult = await ai.extractOfferFromEmail(bodyText + ' ' + subject);
+        if (aiResult && aiResult.apply_url) {
+          extractedOffers = [aiResult];
+        }
+      } catch (err) {
+        logger.warn(`AI extraction failed: ${err.message}`);
+      }
+    }
+
+    // Fallback to regex if AI failed or didn't find anything
+    if (extractedOffers.length === 0) {
+      const jobUrls = extractUrls(bodyText + ' ' + subject);
+      extractedOffers = jobUrls.map(url => ({
+        title: 'Unknown Position',
+        company: 'Unknown Company',
+        apply_url: url,
+        platform: detectPlatform(url)
+      }));
+    }
+
+    logger.info(`Extracted ${extractedOffers.length} offer(s) from email "${subject}"`);
 
     // Insert email log
     const { data: emailLog, error: logError } = await supabase
@@ -104,57 +129,70 @@ router.post('/email', express.raw({ type: 'application/json' }), async (req, res
         user_id: botUserId,
         from_address: fromAddress,
         subject,
-        links_extracted: jobUrls.length,
-        raw_body: bodyText.substring(0, 10000), // Cap at 10k chars
+        raw_body: bodyText.substring(0, 5000),
         resend_email_id: emailData.id || null,
       })
       .select()
       .single();
 
-    if (logError) {
-      logger.error(`Failed to insert email log: ${logError.message}`);
-      // Don't fail — still try to process URLs
-    }
+    if (logError) logger.error(`Failed to insert email log: ${logError.message}`);
 
-    // Upsert applications for each job URL and enqueue
+    // Create offers and applications
     let queued = 0;
-    for (const url of jobUrls) {
-      const platform = detectPlatform(url);
+    for (const offerData of extractedOffers) {
+      // 1. Create/Get Offer
+      const { data: offer, error: offerErr } = await supabase
+        .from('offers')
+        .upsert({
+          user_id: botUserId,
+          email_log_id: emailLog?.id || null,
+          title: offerData.title,
+          company: offerData.company,
+          apply_url: offerData.apply_url,
+          status: 'new'
+        }, { onConflict: 'user_id,apply_url' })
+        .select()
+        .single();
 
+      if (offerErr) {
+        logger.warn(`Failed to upsert offer: ${offerErr.message}`);
+        continue;
+      }
+
+      // 2. Create Application
       const { data: app, error: appError } = await supabase
         .from('applications')
         .upsert({
           user_id: botUserId,
-          email_log_id: emailLog?.id || null,
-          job_url: url,
-          platform,
+          offer_id: offer.id,
+          job_url: offer.apply_url,
+          platform: offerData.platform || detectPlatform(offer.apply_url),
           status: 'pending',
-        }, { onConflict: 'user_id,job_url', ignoreDuplicates: false })
+        }, { onConflict: 'user_id,offer_id' })
         .select()
         .single();
 
       if (appError) {
-        logger.warn(`Failed to upsert application for ${url}: ${appError.message}`);
+        logger.warn(`Failed to upsert application: ${appError.message}`);
         continue;
       }
 
-      // Only enqueue if the status is pending (don't re-process completed ones)
+      // 3. Enqueue
       if (app.status === 'pending') {
         await applicationQueue.add('apply', {
           applicationId: app.id,
-          jobUrl: url,
+          jobUrl: offer.apply_url,
           userId: botUserId,
-        }, {
-          jobId: `apply-${app.id}`,
-          attempts: 2,
-          backoff: { type: 'exponential', delay: 30000 },
         });
+        
+        await supabase.from('offers').update({ status: 'queued' }).eq('id', offer.id);
         queued++;
       }
     }
 
-    logger.info(`Webhook processed: queued=${queued}, total_urls=${jobUrls.length}`);
-    res.json({ ok: true, queued, total: jobUrls.length });
+    logger.info(`Webhook processed: queued=${queued}, total_offers=${extractedOffers.length}`);
+    res.json({ ok: true, queued, total: extractedOffers.length });
+
   } catch (err) {
     logger.error(`Webhook error: ${err.message}`);
     res.status(500).json({ error: 'Webhook processing failed' });
