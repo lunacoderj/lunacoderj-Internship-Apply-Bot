@@ -6,15 +6,17 @@ const logger = createLogger('queue');
 
 // Parse Redis connection from REDIS_URL or use defaults
 const getRedisConnection = () => {
-  const redisUrl = process.env.REDIS_URL;
+  const redisUrl = process.env.REDIS_URL?.trim();
   if (redisUrl) {
     try {
-      const url = new URL(redisUrl);
+      // Handle cases where the URL might still be wrapped in quotes
+      const cleanUrl = redisUrl.replace(/^["']|["']$/g, '');
+      const url = new URL(cleanUrl);
       return {
         host: url.hostname,
         port: parseInt(url.port) || 6379,
-        password: url.password || undefined,
-        username: url.username || undefined,
+        password: decodeURIComponent(url.password || ''),
+        username: decodeURIComponent(url.username || ''),
         ...(url.protocol === 'rediss:' && { tls: {} }), // TLS for rediss:// URIs
       };
     } catch (e) {
